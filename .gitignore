@@ -1,0 +1,36 @@
+# Dependencies & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Databases & Reports
+*.db
+*.sqlite
+backend/reports/*.pdf
+
+# Environment configs
+.env
+.env.development
+.env.production
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# AI Stack Infrastructure
+.gemini/
+graphify-out/
+.ai-stack.json
+C:/AI_STACK/
+C:/AI_STACK/projects/
+
+# Markdown Rules: Ignore all markdown files except the root README.md
+**/*.md
+!/README.md
