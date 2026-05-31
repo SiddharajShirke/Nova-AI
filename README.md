@@ -96,7 +96,7 @@ Edit the `.env` file to add your API credentials:
 ```ini
 # --- NVIDIA NIM (Primary LLM) ---
 # Prepend "nvapi-" to your key if not present
-NVIDIA_API_KEY=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
+NVIDIA_API_KEY= 
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NVIDIA_MODEL=meta/llama-3.3-70b-instruct
 
