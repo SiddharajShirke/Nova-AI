@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_model: str = "meta/llama-3.3-70b-instruct"
 
-    # Google Gemini (fallback)
-    google_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash-latest"
-
     # PageSpeed Insights
     pagespeed_api_key: str = ""
 
@@ -38,11 +34,15 @@ class Settings(BaseSettings):
 
     @property
     def nvidia_available(self) -> bool:
-        return bool(self.nvidia_api_key and self.nvidia_api_key != "nvapi-xxxx")
+        k = self.nvidia_api_key
+        return bool(k and k != "nvapi-xxxx" and "XXX" not in k and "xxx" not in k)
 
     @property
-    def gemini_available(self) -> bool:
-        return bool(self.google_api_key and self.google_api_key != "AIzaXXXX")
+    def pagespeed_key_valid(self) -> str | None:
+        k = self.pagespeed_api_key
+        if k and "XXX" not in k and "xxx" not in k:
+            return k
+        return None
 
 
 @lru_cache()

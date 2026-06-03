@@ -3,6 +3,7 @@ Nova AI — AI Executive Narrative Generator
 Produces a C-level plain-English summary with revenue impact framing.
 """
 import logging
+import time
 from app.llm.gateway import llm_complete
 
 logger = logging.getLogger(__name__)
@@ -43,18 +44,27 @@ Be specific, reference scores, mention revenue where possible."""
 
 
 async def generate_narrative(result: dict) -> str:
+    url = result.get("url", "unknown")
+    prompt = _build_narrative_prompt(result)
+    logger.info(f"[Narrative] Generating for {url} | prompt={len(prompt)} chars")
+    start_t = time.time()
     try:
         narrative = await llm_complete(
-            prompt=_build_narrative_prompt(result),
+            prompt=prompt,
             system=NARRATIVE_SYSTEM,
             max_tokens=1200,
             provider_hint="nvidia",
         )
+        elapsed = time.time() - start_t
+        logger.info(f"[Narrative] ✅ Generated for {url} in {elapsed:.1f}s | {len(narrative)} chars")
         return narrative.strip()
     except Exception as e:
-        logger.error(f"[Narrative] Failed: {e}")
+        elapsed = time.time() - start_t
+        error_msg = str(e).strip() or "No error message provided."
+        logger.error(f"[Narrative] ❌ Failed for {url} after {elapsed:.1f}s | {type(e).__name__}: {error_msg}")
         return (
             f"This website scored {result.get('overall_score', 0):.0f}/100 (Grade: {result.get('grade', 'N/A')}) "
             f"across 8 marketing dimensions. {len(result.get('findings', []))} issues identified. "
-            f"[Narrative generation failed: {e}]"
+            f"[Narrative generation failed: {type(e).__name__} - {error_msg}]"
         )
+

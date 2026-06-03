@@ -7,7 +7,6 @@ class AccessibilityAgent(BaseAgent):
     name = "accessibility"
     display_name = "Accessibility (WCAG)"
     weight = 0.06
-    provider_hint = "gemini"
     max_tokens = 1000
 
     def build_prompt(self, crawl: CrawlResult) -> str:

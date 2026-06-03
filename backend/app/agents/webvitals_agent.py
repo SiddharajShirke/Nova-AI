@@ -26,8 +26,9 @@ async def fetch_pagespeed(url: str) -> Optional[dict]:
         "strategy": "mobile",
         "category": ["performance", "accessibility", "seo", "best-practices"],
     }
-    if settings.pagespeed_api_key:
-        params["key"] = settings.pagespeed_api_key
+    pagespeed_key = getattr(settings, "pagespeed_key_valid", None) or settings.pagespeed_api_key
+    if pagespeed_key and "XXX" not in pagespeed_key and "xxx" not in pagespeed_key:
+        params["key"] = pagespeed_key
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -63,7 +64,6 @@ class WebVitalsAgent(BaseAgent):
     name = "webvitals"
     display_name = "Web Vitals & Performance"
     weight = 0.08
-    provider_hint = "gemini"
     max_tokens = 800
 
     async def analyze(self, crawl: CrawlResult) -> AgentResult:

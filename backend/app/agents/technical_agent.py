@@ -7,7 +7,6 @@ class TechnicalAgent(BaseAgent):
     name = "technical"
     display_name = "Technical SEO"
     weight = 0.12
-    provider_hint = "gemini"
     max_tokens = 1200
 
     def build_prompt(self, crawl: CrawlResult) -> str:

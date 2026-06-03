@@ -1,19 +1,24 @@
 """
 Nova AI — LLM Gateway
 Primary: NVIDIA NIM (llama-3.3-70b-instruct via OpenAI-compatible API)
-Fallback: Google Gemini (gemini-1.5-flash-latest)
-Circuit breaker per provider. 30s timeout. Cost tracking.
+Circuit breaker for NVIDIA provider. Retry with backoff. Cost tracking.
 """
 import asyncio
 import time
 import logging
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-import google.generativeai as genai
 from openai import AsyncOpenAI, RateLimitError, APIStatusError, APITimeoutError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
 
 from app.config import get_settings
 
@@ -61,11 +66,9 @@ class CircuitBreaker:
 
 # Singleton circuit breakers
 _nvidia_cb = CircuitBreaker("nvidia")
-_gemini_cb = CircuitBreaker("gemini")
 
 # Cost tracking (rough estimates per 1M tokens)
 NVIDIA_COST_PER_1M = 0.35   # llama-3.3-70b on NIM
-GEMINI_COST_PER_1M = 0.075  # gemini-1.5-flash
 
 _total_cost_usd: float = 0.0
 _nvidia_client: Optional[AsyncOpenAI] = None
@@ -82,16 +85,34 @@ def _get_nvidia_client() -> AsyncOpenAI:
     return _nvidia_client
 
 
-def _setup_gemini():
-    if settings.gemini_available:
-        genai.configure(api_key=settings.google_api_key)
+def _format_api_error(e: Exception) -> str:
+    """Extract meaningful error details from OpenAI SDK exceptions."""
+    parts = [type(e).__name__]
+    if isinstance(e, APIStatusError):
+        parts.append(f"status={e.status_code}")
+        try:
+            body = e.response.text[:500] if hasattr(e, "response") and e.response else "no response body"
+            parts.append(f"body={body}")
+        except Exception:
+            pass
+    msg = str(e).strip()
+    if msg:
+        parts.append(msg)
+    else:
+        parts.append("No additional error message provided by exception")
+    return " | ".join(parts)
 
 
-_setup_gemini()
-
-
+@retry(
+    retry=retry_if_exception_type((RateLimitError, asyncio.TimeoutError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 async def _call_nvidia(prompt: str, system: str, max_tokens: int = 1024) -> str:
     client = _get_nvidia_client()
+    start_t = time.time()
     response = await client.chat.completions.create(
         model=settings.nvidia_model,
         messages=[
@@ -101,93 +122,56 @@ async def _call_nvidia(prompt: str, system: str, max_tokens: int = 1024) -> str:
         max_tokens=max_tokens,
         temperature=0.3,
     )
+    elapsed = time.time() - start_t
     usage = response.usage
+    tokens_used = 0
     if usage:
-        cost = (usage.total_tokens / 1_000_000) * NVIDIA_COST_PER_1M
+        tokens_used = usage.total_tokens
+        cost = (tokens_used / 1_000_000) * NVIDIA_COST_PER_1M
         global _total_cost_usd
         _total_cost_usd += cost
     content = response.choices[0].message.content or ""
     # Strip <think> tags from reasoning models
     if "<think>" in content:
         content = content.split("</think>")[-1].strip()
+    logger.info(f"[Gateway] NVIDIA response: {elapsed:.1f}s, {tokens_used} tokens, {len(content)} chars")
     return content
-
-
-async def _call_gemini(prompt: str, system: str, max_tokens: int = 1024) -> str:
-    loop = asyncio.get_event_loop()
-    model = genai.GenerativeModel(
-        model_name=settings.gemini_model,
-        system_instruction=system,
-    )
-
-    def _sync_call():
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=max_tokens,
-                temperature=0.3,
-            ),
-        )
-        return response.text
-
-    text = await asyncio.wait_for(loop.run_in_executor(None, _sync_call), timeout=45.0)
-    # Rough cost estimate
-    tokens = len(prompt.split()) + len(text.split())
-    global _total_cost_usd
-    _total_cost_usd += (tokens / 1_000_000) * GEMINI_COST_PER_1M
-    return text
 
 
 async def llm_complete(
     prompt: str,
     system: str = "You are a professional marketing analyst. Return only valid JSON as instructed.",
     max_tokens: int = 1024,
-    provider_hint: str = "auto",  # "nvidia" | "gemini" | "auto"
+    provider_hint: str = "auto",
 ) -> str:
     """
-    Route an LLM completion through NVIDIA first, Gemini as fallback.
+    Route an LLM completion through NVIDIA NIM.
     Returns the text response string.
     """
-    providers = []
+    if not settings.nvidia_available:
+        raise RuntimeError("NVIDIA API Key is not configured. Add NVIDIA_API_KEY to .env")
 
-    if provider_hint == "gemini":
-        providers = ["gemini", "nvidia"]
-    elif provider_hint == "nvidia":
-        providers = ["nvidia", "gemini"]
-    else:
-        # Auto: prefer NVIDIA if available
-        if settings.nvidia_available:
-            providers.append("nvidia")
-        if settings.gemini_available:
-            providers.append("gemini")
+    if not _nvidia_cb.is_available:
+        raise RuntimeError(
+            "NVIDIA circuit breaker is OPEN (temporarily disabled due to consecutive errors). "
+            "Please check your API key or wait for recovery timeout (90s)."
+        )
 
-    if not providers:
-        raise RuntimeError("No LLM providers configured. Add NVIDIA_API_KEY or GOOGLE_API_KEY to .env")
-
-    last_error = None
-    for provider in providers:
-        cb = _nvidia_cb if provider == "nvidia" else _gemini_cb
-        if not cb.is_available:
-            logger.info(f"[Gateway] {provider} circuit OPEN — skipping")
-            continue
-        try:
-            logger.info(f"[Gateway] Calling {provider} ({settings.nvidia_model if provider == 'nvidia' else settings.gemini_model})")
-            if provider == "nvidia":
-                result = await asyncio.wait_for(_call_nvidia(prompt, system, max_tokens), timeout=35.0)
-            else:
-                result = await _call_gemini(prompt, system, max_tokens)
-            cb.record_success()
-            return result
-        except (RateLimitError, APIStatusError, APITimeoutError, asyncio.TimeoutError) as e:
-            logger.warning(f"[Gateway] {provider} failed: {type(e).__name__}: {e}")
-            cb.record_failure()
-            last_error = e
-        except Exception as e:
-            logger.error(f"[Gateway] {provider} unexpected error: {e}")
-            cb.record_failure()
-            last_error = e
-
-    raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
+    try:
+        logger.info(f"[Gateway] Calling NVIDIA ({settings.nvidia_model}) | prompt={len(prompt)} chars, max_tokens={max_tokens}")
+        result = await asyncio.wait_for(_call_nvidia(prompt, system, max_tokens), timeout=45.0)
+        _nvidia_cb.record_success()
+        return result
+    except (RateLimitError, APIStatusError, APITimeoutError, asyncio.TimeoutError) as e:
+        error_detail = _format_api_error(e)
+        logger.error(f"[Gateway] NVIDIA API error: {error_detail}")
+        _nvidia_cb.record_failure()
+        raise RuntimeError(f"NVIDIA LLM provider failed: {error_detail}") from e
+    except Exception as e:
+        error_detail = _format_api_error(e)
+        logger.error(f"[Gateway] NVIDIA unexpected error: {error_detail}\n{traceback.format_exc()}")
+        _nvidia_cb.record_failure()
+        raise RuntimeError(f"NVIDIA LLM provider unexpected error: {error_detail}") from e
 
 
 def get_gateway_stats() -> dict:
@@ -197,10 +181,7 @@ def get_gateway_stats() -> dict:
             "state": _nvidia_cb.state.value,
             "failures": _nvidia_cb._failures,
             "available": settings.nvidia_available,
-        },
-        "gemini": {
-            "state": _gemini_cb.state.value,
-            "failures": _gemini_cb._failures,
-            "available": settings.gemini_available,
+            "model": settings.nvidia_model,
         },
     }
+

@@ -7,7 +7,6 @@ class SecurityAgent(BaseAgent):
     name = "security"
     display_name = "Security & Trust"
     weight = 0.04
-    provider_hint = "gemini"
     max_tokens = 900
 
     def build_prompt(self, crawl: CrawlResult) -> str:
